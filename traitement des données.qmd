@@ -1,0 +1,779 @@
+---
+title: "Econométrie 2"
+author: "Kodjo A. KODOWOU"
+format: html
+editor: visual
+  html:
+    math: mathjax
+---
+
+# 1. Importation et traitement des données
+
+## 1.1 Données sur le taux de change
+
+ces données ont directement été téléchargés sur le site de la BIC via ces codes:
+
+EUR/USD
+
+TRI/USD
+
+CNY/USD
+
+RUB/USD
+
+| Devise cible | Code SDMX BIS |
+|--------------|---------------|
+| EUR          | `Q.XM.EUR.A`  |
+| USD          | `Q.XM.USD.A`  |
+| CNY (Yuan)   | `Q.XM.CNY.A`  |
+| RUB (Rouble) | `Q.XM.RUB.A`  |
+| GBP (Livre)  | `Q.XM.GBP.A`  |
+| JPY (Yen)    | `Q.XM.JPY.A`  |
+
+```{r}
+# Liste des URLs BIS pour les taux de change bilatéraux trimestriels
+urls <- c(
+  "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_XRU/1.0/Q.XM.EUR.A?format=csv",
+  "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_XRU/1.0/Q.TR.TRY.E?format=csv",
+  "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_XRU/1.0/Q.CN.CNY.A?format=csv",
+  "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_XRU/1.0/Q.RU.RUB.A?format=csv",
+  "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_XRU/1.0/Q.GB.GBP.A?format=csv",
+  "https://stats.bis.org/api/v2/data/dataflow/BIS/WS_XRU/1.0/Q.JP.JPY.E?format=csv"
+)
+
+# Initialisation
+data <- list()
+
+# Boucle de téléchargement
+for (i in seq_along(urls)) {
+  temp <- tryCatch({
+    read.csv(urls[i])
+  }, error = function(e) {
+    message(paste("Erreur avec l'URL :", urls[i]))
+    return(NULL)
+  })
+  
+  if (!is.null(temp)) {
+    temp$source_url <- urls[i]
+    data[[length(data) + 1]] <- temp
+  }
+}
+
+# Fusion des données
+list_df <- do.call(rbind, data)
+
+# Aperçu
+head(list_df)
+
+  
+```
+
+### Néttoyage des données sur le taux de change :
+
+```{r}
+# supprimer les variables inutiles
+xch_rates <- list_df[, c("CURRENCY", "TIME_PERIOD", "OBS_VALUE")]
+names(xch_rates)[names(xch_rates) == "OBS_VALUE"] <- "exchange_rate"
+
+
+# Extraire l'année depuis TIME_PERIOD et convertir en numérique
+xch_rates <- xch_rates %>%
+  filter(as.numeric(substr(TIME_PERIOD, 1, 4)) >= 2000 & as.numeric(substr(TIME_PERIOD, 1, 4)) <= 2025)
+
+```
+
+### Vérifier les pays qui ont été téléchargés et s'assurer que tous les pays ont le même nombre de séries
+
+```{r}
+
+# 🔍 3. Vérification des pays présents
+currencies <- unique(xch_rates$CURRENCY)
+cat("Pays présents dans la base :", length(currencies), "\n")
+print(currencies)
+
+# 📊 4. Vérifier le nombre de séries par pays
+series_count <- table(xch_rates$CURRENCY)
+print(series_count)
+
+# 🧪 5. Test : tous les pays ont-ils le même nombre de séries ?
+if (length(unique(series_count)) == 1) {
+  cat("✅ Tous les pays ont le même nombre de séries :", unique(series_count), "\n")
+} else {
+  cat("⚠️ Les pays n'ont pas tous le même nombre de séries.\n")
+  print(series_count)
+}
+
+```
+
+### étandre les données sur les pays européens
+
+```{r}
+library(dplyr)
+
+# 1. Créer la correspondance simple devise → pays
+currency_map <- data.frame(
+  CURRENCY = c("JPY", "CNY", "TRY", "GBP", "RUB"),
+  COUNTRY.ID = c("JPN", "CHN", "TUR", "GBR", "RUS")
+)
+
+# 2. Ajouter les pays européens à partir des lignes EUR
+euro_countries <- c("FRA", "ESP", "DEU", "ITA", "NLD")
+
+eur_rows <- xch_rates %>%
+  filter(CURRENCY == "EUR") %>%
+  slice(rep(1:n(), each = length(euro_countries))) %>%
+  mutate(COUNTRY.ID = rep(euro_countries, times = nrow(.) / length(euro_countries)))
+
+# 3. Ajouter les correspondances simples
+non_eur_rows <- xch_rates %>%
+  filter(CURRENCY != "EUR") %>%
+  left_join(currency_map, by = "CURRENCY")
+
+# 4. Combiner les deux
+exch_rate_final <- bind_rows(non_eur_rows, eur_rows)
+
+```
+
+### Ajouter les états unis
+
+puisque nous n'avont pas les données sur le taux de change USD/USD, nous allons donner une valeur de 1 au taux de change USD/USD
+
+```{r}
+# 1. Identifier les périodes à couvrir
+time_periods <- unique(exch_rate_final$TIME_PERIOD)
+
+# 2. Créer les lignes manquantes pour les États-Unis
+usd_rows <- data.frame(
+  COUNTRY.ID = "USA",
+  TIME_PERIOD = time_periods,
+  CURRENCY = "USD",
+  exchange_rate = 1  # créer des valeur 1 pour dollar-dollar
+)
+
+# 3. Ajouter à la base existante
+exch_rate_final <- bind_rows(exch_rate_final, usd_rows)
+
+```
+
+## 1.2 Données sur IPC et IPP
+
+### traitement des données de l'IPC
+
+```{r}
+# 📥 1. Importer la base
+ipc <- read.csv("C:/Université de Lorraine/Master 1 IFM/Semestre1/Mémoire Econométrie 2/Données/traitement/ipc.csv", sep = ";", stringsAsFactors = FALSE)
+
+# 🧹 2. Filtrer uniquement les lignes HICP
+# Suppression des lignes CPI pour GBR et TUR
+
+
+# 🔍 3. Vérification des pays présents
+countries <- unique(ipc$COUNTRY)
+cat("Pays présents dans la base :", length(countries), "\n")
+print(countries)
+
+# 📊 4. Vérifier le nombre de séries par pays
+series_count <- table(ipc$COUNTRY)
+print(series_count)
+
+# 🧪 5. Test : tous les pays ont-ils le même nombre de séries ?
+if (length(unique(series_count)) == 1) {
+  cat("✅ Tous les pays ont le même nombre de séries :", unique(series_count), "\n")
+} else {
+  cat("⚠️ Les pays n'ont pas tous le même nombre de séries.\n")
+  print(series_count)
+}
+
+
+```
+
+### Supprimer les variables non pertinentes: Garder uniquement les les données suivantes :
+
+```{r}
+ipc <- ipc[, c("COUNTRY.ID", "COUNTRY", "TIME_PERIOD", "OBS_VALUE")]
+names(ipc)[names(ipc) == "OBS_VALUE"] <- "CPI"
+
+```
+
+## 1.3 Données sur l'IPP
+
+```{r}
+# 📥 1. Importer la base
+ipp <- read.csv("C:/Université de Lorraine/Master 1 IFM/Semestre1/Mémoire Econométrie 2/Données/traitement/ipp.csv", sep = ";", stringsAsFactors = FALSE)
+
+# 🧹 2. Filtrer uniquement les lignes HICP
+
+
+# 🔍 3. Vérification des pays présents
+countries <- unique(ipp$COUNTRY.ID)
+cat("Pays présents dans la base :", length(countries), "\n")
+print(countries)
+
+# 📊 4. Vérifier le nombre de séries par pays
+series_count <- table(ipp$COUNTRY.ID)
+print(series_count)
+
+# 🧪 5. Test : tous les pays ont-ils le même nombre de séries ?
+if (length(unique(series_count)) == 1) {
+  cat("✅ Tous les pays ont le même nombre de séries :", unique(series_count), "\n")
+} else {
+  cat("⚠️ Les pays n'ont pas tous le même nombre de séries.\n")
+  print(series_count)
+}
+
+```
+
+### Suprimer les variables non pertinentes
+
+```{r}
+ipp <- ipp[, c("COUNTRY.ID", "COUNTRY", "TIME_PERIOD", "OBS_VALUE")]
+names(ipp)[names(ipp) == "OBS_VALUE"] <- "IPP"
+```
+
+## 1.4. Merge des bases IPC et IPP
+
+```{r}
+# Ranger les données sur les variables ID et periode
+
+ipc <- ipc %>% arrange(COUNTRY.ID, TIME_PERIOD)
+ipp <- ipp %>% arrange(COUNTRY.ID, TIME_PERIOD)
+
+# Merge des dezux bases
+ipc_ipp <- left_join(ipc, ipp, by = c("COUNTRY.ID", "TIME_PERIOD"))
+
+```
+
+## 1.5. Merge des bases ipc_ipp et exch_rate_final
+
+```{r}
+library(dplyr)
+
+# 1. Trier les deux bases par COUNTRY.ID et TIME_PERIOD
+exch_rate_final <- exch_rate_final %>%
+  arrange(COUNTRY.ID, TIME_PERIOD)
+
+ipc_ipp <- ipc_ipp %>%
+  arrange(COUNTRY.ID, TIME_PERIOD)
+
+# 2. Merger les deux bases sur les clés communes
+base_merged <- left_join(ipc_ipp, exch_rate_final, by = c("COUNTRY.ID", "TIME_PERIOD"))
+
+```
+
+### néttoyage de la base fusionnée
+
+```{r}
+# Suprimer la colonne country.y et renomer la colonne country.x en country
+base_merged <- base_merged[, names(base_merged) != "COUNTRY.y"]
+
+names(base_merged)[names(base_merged) == "COUNTRY.x"] <- "COUNTRY"
+```
+
+# 2. Création de variables
+
+## 2.1 Calcule des taux de change TRY/X
+
+Nous disposons de taux de change exprimés au certain, c’est-à-dire :
+
+-   USD/X : nombre d’unités de devise X que l’on obtient pour 1 dollar américain (USD)
+
+-   USD/TRY : nombre de livres turques (TRY) que l’on obtient pour 1 USD
+
+Nous souhaitons calculer le taux bilatéral TRY/X, c’est-à-dire : combien d’unités de devise X peut-on obtenir avec 1 livre turque.
+
+La formule correcte est :
+
+TRY/X = USD/X ÷ USD/TRY
+
+Autrement dit, on divise le taux USD/X par le taux USD/TRY pour obtenir le taux bilatéral exprimé en livres turques.
+
+Par exemple, si USD/TRY = 28.00 et USD/EUR = 0.92, alors :
+
+TRY/EUR = 0.92 ÷ 28.00 ≈ 0.0329
+
+Cela signifie qu’avec 1 TRY, on obtient environ 0.0329 EUR.
+
+Dans le code R, on commence par extraire les taux USD/TRY pour chaque période, puis on les fusionne avec la base principale. Ensuite, on crée une nouvelle variable TRY_per_X qui vaut 1 pour la Turquie (puisque TRY/TRY = 1 par définition), et qui vaut exchange_rate ÷ usd_try_rate pour tous les autres pays.
+
+```{r}
+library(dplyr)
+
+# 1. Extraire les taux USD/TRY
+usd_try <- base_merged %>%
+  filter(COUNTRY.ID == "TUR") %>%
+  select(TIME_PERIOD, usd_try_rate = exchange_rate)
+
+# 2. Calculer TRY/X = USD/X / USD/TRY
+base_merged <- base_merged %>%
+  left_join(usd_try, by = "TIME_PERIOD") %>%
+  mutate(TRY_per_X = case_when(
+    COUNTRY.ID == "TUR" ~ 1,
+    TRUE ~ exchange_rate / usd_try_rate
+  ))
+
+
+```
+
+Exporter les données sous format CSV
+
+```{r}
+#write.csv(base_merged, "base_merged.csv", row.names = FALSE)
+
+```
+
+# 3. Statistiques descriptives et graphiques
+
+### Table de stat desc
+
+```{r}
+library(dplyr)
+library(stargazer)
+
+# Créer le tableau de stats descriptives par pays
+desc_stats <- base_merged %>%
+  group_by(COUNTRY.ID) %>%
+  summarise(
+    mean_exch = mean(exchange_rate, na.rm = TRUE),
+    sd_exch   = sd(exchange_rate, na.rm = TRUE),
+    min_exch  = min(exchange_rate, na.rm = TRUE),
+    max_exch  = max(exchange_rate, na.rm = TRUE),
+    n_exch    = sum(!is.na(exchange_rate)),
+
+    mean_try  = mean(TRY_per_X, na.rm = TRUE),
+    sd_try    = sd(TRY_per_X, na.rm = TRUE),
+    min_try   = min(TRY_per_X, na.rm = TRUE),
+    max_try   = max(TRY_per_X, na.rm = TRUE),
+    n_try     = sum(!is.na(TRY_per_X)),
+
+    mean_cpi  = mean(CPI, na.rm = TRUE),
+    sd_cpi    = sd(CPI, na.rm = TRUE),
+    min_cpi   = min(CPI, na.rm = TRUE),
+    max_cpi   = max(CPI, na.rm = TRUE),
+    n_cpi     = sum(!is.na(CPI)),
+
+    mean_ipp  = mean(IPP, na.rm = TRUE),
+    sd_ipp    = sd(IPP, na.rm = TRUE),
+    min_ipp   = min(IPP, na.rm = TRUE),
+    max_ipp   = max(IPP, na.rm = TRUE),
+    n_ipp     = sum(!is.na(IPP))
+  )
+desc_stats_rounded <- desc_stats %>%
+  mutate(across(where(is.numeric), ~ round(.x, 4)))
+
+# Exporter en Latex
+stargazer(desc_stats,
+          type = "latex",
+          title = "Statistiques descriptives par pays",
+          summary = FALSE,
+          digits = 2)
+
+```
+
+Graphique
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(zoo)
+
+# 1. Préparer les données
+base_plot <- base_merged %>%
+  filter(!is.na(TRY_per_X)) %>%
+  mutate(date = as.Date(as.yearqtr(TIME_PERIOD, format = "%Y-Q%q")))
+
+# 2. Graphique avec échelle logarithmique
+ggplot(base_plot, aes(x = date, y = TRY_per_X, color = CURRENCY)) +
+  geom_line(size = 1) +
+  scale_y_log10() +
+  labs(title = "Évolution des taux TRY/X par devise (échelle logarithmique)",
+       x = "Date",
+       y = "Taux TRY/X (log)",
+       color = "Devise") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+```
+
+ipc
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(zoo)
+
+# 1. Préparer les données
+ipc_plot <- base_merged %>%
+  filter(!is.na(CPI)) %>%
+  mutate(date = as.Date(as.yearqtr(TIME_PERIOD, format = "%Y-Q%q")))
+
+# 2. Graphique avec échelle logarithmique
+ggplot(ipc_plot, aes(x = date, y = CPI, color = COUNTRY.ID)) +
+  geom_line(size = 1) +
+  scale_y_log10() +
+  labs(title = "Évolution de l'IPC par pays (échelle logarithmique)",
+       x = "Date",
+       y = "Indice des prix à la consommation (log)",
+       color = "Pays") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+```
+
+Graphique pour l'indice des prix à la production :
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(zoo)
+
+# 1. Préparer les données
+ipp_plot <- base_merged %>%
+  filter(!is.na(IPP)) %>%
+  mutate(date = as.Date(as.yearqtr(TIME_PERIOD, format = "%Y-Q%q")))
+
+# 2. Graphique avec toutes les courbes IPP superposées
+ggplot(ipp_plot, aes(x = date, y = IPP, color = COUNTRY.ID)) +
+  geom_line(size = 1) +
+  labs(title = "Évolution de l'indice des prix à la production (IPP) par pays",
+       x = "Date",
+       y = "Indice des prix à la production (IPP)",
+       color = "Pays") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+```
+
+Statistiques descriptives
+
+```{r}
+turkey <- base_merged %>%
+  filter(COUNTRY.ID == "TUR") %>%
+  select(TIME_PERIOD, CPI_TUR = CPI)
+
+france <- base_merged %>%
+  filter(COUNTRY.ID == "FRA") %>%
+  select(TIME_PERIOD, CPI_FRA = CPI, TRY_EUR = TRY_per_X)
+reg_data <- france %>%
+  left_join(turkey, by = "TIME_PERIOD") %>%
+  mutate(
+    log_e = log(TRY_EUR),
+    log_pC = log(CPI_TUR),
+    log_pF = log(CPI_FRA)
+  )
+model <- lm(log_e ~ log_pC + log_pF, data = reg_data)
+summary(model)
+
+```
+
+```{r}
+install.packages("broom")  # à faire une seule fois
+library(broom)
+
+```
+
+```{r}
+library(stargazer)
+stargazer(model, type = "text", title = "Résultats de la régression", digits = 4)
+
+
+```
+
+```{r}
+# Données Turquie
+turkey_cpi <- base_merged %>%
+  filter(COUNTRY.ID == "TUR") %>%
+  select(TIME_PERIOD, CPI_TUR = CPI, IPP_TUR = IPP)
+
+# Données France
+france_cpi <- base_merged %>%
+  filter(COUNTRY.ID == "FRA") %>%
+  select(TIME_PERIOD, CPI_FRA = CPI, IPP_FRA = IPP, TRY_EUR = TRY_per_X)
+
+# Fusion
+reg_data <- france_cpi %>%
+  left_join(turkey_cpi, by = "TIME_PERIOD") %>%
+  mutate(
+    log_e = log(TRY_EUR),
+    log_pC_cpi = log(CPI_TUR),
+    log_pF_cpi = log(CPI_FRA),
+    log_pC_ipp = log(IPP_TUR),
+    log_pF_ipp = log(IPP_FRA)
+  )
+
+# IPC
+model_cpi <- lm(log_e ~ log_pC_cpi + log_pF_cpi, data = reg_data)
+
+# IPP
+model_ipp <- lm(log_e ~ log_pC_ipp + log_pF_ipp, data = reg_data)
+
+# Tableau comparatif
+
+stargazer(model_cpi, model_ipp,
+          type = "text",
+          title = "Comparaison des régressions IPC vs IPP",
+          column.labels = c("IPC", "IPP"),
+          digits = 4,
+          align = TRUE)
+
+```
+
+Table de régression pour toutes les paires de devise
+
+```{r}
+library(dplyr)
+library(stargazer)
+
+# Fonction pour une paire TRY/X
+estime_regression <- function(data, country_foreign, price_var = "CPI") {
+  # Turquie
+  turkey <- data %>%
+    filter(COUNTRY.ID == "TUR") %>%
+    select(TIME_PERIOD, TUR_price = !!sym(price_var))
+  
+  # Pays étranger
+  foreign <- data %>%
+    filter(COUNTRY.ID == country_foreign) %>%
+    select(TIME_PERIOD, FOR_price = !!sym(price_var), TRY_X = TRY_per_X)
+  
+  # Fusion
+  reg_data <- foreign %>%
+    left_join(turkey, by = "TIME_PERIOD") %>%
+    mutate(
+      log_e  = log(TRY_X),
+      log_pC = log(TUR_price),
+      log_pF = log(FOR_price)
+    )
+  
+  # Régression
+  lm(log_e ~ log_pC + log_pF, data = reg_data)
+}
+
+# Liste des devises à tester
+devises <- c("USA", "GBR", "JPN", "CHN", "RUS", "FRA")  # FRA = France pour l’euro
+
+# Estimer les modèles
+models <- lapply(devises, function(dev) estime_regression(base_merged, dev, price_var = "CPI"))
+
+# Tableau comparatif
+stargazer(models,
+          type = "text",
+          title = "Régressions CPP pour TRY/X (Euro = France)",
+          column.labels = devises,
+          digits = 4,
+          align = TRUE)
+
+```
+
+### Test de Dickey-Fuller augmenté (ADF)
+
+Le test de Dickey-Fuller augmenté permet de vérifier la **stationnarité** d’une série temporelle.
+
+#### Hypothèses :
+
+-   **H0 (nulle)** : la série possède une racine unitaire → elle est **non stationnaire**.
+-   **H1 (alternative)** : la série est stationnaire.
+
+#### Résultats :
+
+-   Pour `log_e` (TRY/EUR), la p-value est supérieure à 0.05 → on **ne rejette pas H0** : la série est non stationnaire.
+-   Pour `log_pC` (prix Turquie), la p-value est inférieure à 0.05 → on **rejette H0** : la série est stationnaire.
+-   Pour `log_pF` (prix France), la p-value est supérieure à 0.05 → la série est non stationnaire.
+
+#### Interprétation :
+
+-   Les taux de change et les indices de prix sont souvent **non stationnaires en niveau**, mais peuvent devenir stationnaires après différenciation (première différence).
+-   Cela suggère que les séries sont intégrées d’ordre 1 (I(1)), ce qui est cohérent avec la littérature sur la parité de pouvoir d’achat.
+
+```{r}
+library(dplyr)
+library(tseries)
+
+# Fonction générique pour appliquer le test ADF
+test_adf <- function(series, name) {
+  if(all(is.na(series))) {
+    return(data.frame(Serie = name, Statistique = NA, P.value = NA))
+  }
+  res <- adf.test(na.omit(series))
+  data.frame(Serie = name,
+             Statistique = res$statistic,
+             P.value = res$p.value)
+}
+
+# Exemple : liste des devises à tester
+devises <- c("USA", "GBR", "JPN", "CHN", "RUS", "FRA")
+
+# Initialiser tableau résultats
+results <- data.frame()
+
+for(dev in devises){
+  # Turquie
+  turkey <- base_merged %>%
+    filter(COUNTRY.ID == "TUR") %>%
+    select(TIME_PERIOD, CPI_TUR = CPI, IPP_TUR = IPP)
+  
+  # Pays étranger
+  foreign <- base_merged %>%
+    filter(COUNTRY.ID == dev) %>%
+    select(TIME_PERIOD, CPI_FOR = CPI, IPP_FOR = IPP, TRY_X = TRY_per_X)
+  
+  # Fusion
+  reg_data <- foreign %>%
+    left_join(turkey, by = "TIME_PERIOD") %>%
+    mutate(
+      log_e     = log(TRY_X),
+      log_pC_cpi = log(CPI_TUR),
+      log_pF_cpi = log(CPI_FOR),
+      log_pC_ipp = log(IPP_TUR),
+      log_pF_ipp = log(IPP_FOR)
+    )
+  
+  # Tests ADF pour chaque série
+  results <- rbind(results,
+                   test_adf(reg_data$log_e, paste0("TRY/", dev)),
+                   test_adf(reg_data$log_pC_cpi, paste0("CPI_TUR vs ", dev)),
+                   test_adf(reg_data$log_pF_cpi, paste0("CPI_", dev)),
+                   test_adf(reg_data$log_pC_ipp, paste0("IPP_TUR vs ", dev)),
+                   test_adf(reg_data$log_pF_ipp, paste0("IPP_", dev)))
+}
+
+# Résultats finaux
+print(results)
+
+```
+
+### Stationnarité des différences premières
+
+Les séries non stationnaires en niveau peuvent être stationnaires en différence première. Cela signifie qu’elles sont **intégrées d’ordre 1 (I(1))**.
+
+#### Hypothèses du test ADF :
+
+-   **H0** : la série a une racine unitaire → elle est **non stationnaire**.
+-   **H1** : la série est stationnaire.
+
+#### Résultats :
+
+-   Les séries `Δlog(TRY/X)` sont généralement **stationnaires** (p-value \< 0.05).
+-   Les séries `Δlog(CPI)` et `Δlog(IPP)` sont aussi souvent **stationnaires**.
+-   Cela confirme que les séries sont **I(1)**, ce qui est une condition nécessaire pour les tests de **co-intégration**.
+
+#### Interprétation :
+
+-   On peut maintenant tester la **co-intégration** entre le taux de change et les indices de prix.
+-   Si les résidus de la régression sont stationnaires, cela valide la **parité de pouvoir d’achat à long terme**.
+
+```{r}
+# Fonction pour calculer Δlog(x)
+diff_log <- function(x) {
+  return(diff(log(na.omit(x))))
+}
+
+results_diff <- data.frame()
+
+for(dev in devises){
+  # Turquie
+  turkey <- base_merged %>%
+    filter(COUNTRY.ID == "TUR") %>%
+    select(TIME_PERIOD, CPI_TUR = CPI, IPP_TUR = IPP)
+  
+  # Pays étranger
+  foreign <- base_merged %>%
+    filter(COUNTRY.ID == dev) %>%
+    select(TIME_PERIOD, CPI_FOR = CPI, IPP_FOR = IPP, TRY_X = TRY_per_X)
+  
+  # Fusion
+  reg_data <- foreign %>%
+    left_join(turkey, by = "TIME_PERIOD")
+  
+  # Différences premières
+  results_diff <- rbind(results_diff,
+    test_adf(diff_log(reg_data$TRY_X), paste0("Δlog TRY/", dev)),
+    test_adf(diff_log(reg_data$CPI_TUR), paste0("Δlog CPI_TUR vs ", dev)),
+    test_adf(diff_log(reg_data$CPI_FOR), paste0("Δlog CPI_", dev)),
+    test_adf(diff_log(reg_data$IPP_TUR), paste0("Δlog IPP_TUR vs ", dev)),
+    test_adf(diff_log(reg_data$IPP_FOR), paste0("Δlog IPP_", dev))
+  )
+}
+# Résultats finaux
+print(results_diff)
+```
+
+### Régression de la parité de pouvoir d’achat relative
+
+La PPA relative postule que la variation du taux de change est proportionnelle au différentiel d’inflation entre deux pays :
+
+$$
+\Delta \log(e_t) = \alpha + \beta \cdot \left[ \Delta \log(p_t^C) - \Delta \log(p_t^F) \right] + \varepsilon_t
+$$
+
+#### Hypothèse :
+
+-   Si la PPA relative est vérifiée, alors **β ≈ 1**
+
+#### Interprétation :
+
+-   Si β est significativement différent de 1, cela suggère que le taux de change ne s’ajuste pas parfaitement aux différentiels d’inflation.
+-   Un β \< 1 indique une **sous-réaction** du taux de change.
+-   Un β \> 1 indique une **sur-réaction**.
+
+#### Résultat :
+
+-   Le modèle est estimé en différences logarithmiques.
+-   Les séries sont stationnaires (confirmé par les tests ADF).
+-   La validité de la PPA relative peut être testée par un test de Wald sur β = 1.
+
+```{r}
+# Fonction pour Δlog(x)
+diff_log <- function(x) {
+  return(diff(log(na.omit(x))))
+}
+
+# Fonction pour estimer la PPA relative pour une paire
+estime_ppa_relative <- function(data, country_foreign) {
+  # Turquie
+  turkey <- data %>%
+    filter(COUNTRY.ID == "TUR") %>%
+    select(TIME_PERIOD, CPI_TUR = CPI)
+  
+  # Pays étranger
+  foreign <- data %>%
+    filter(COUNTRY.ID == country_foreign) %>%
+    select(TIME_PERIOD, CPI_FOR = CPI, TRY_X = TRY_per_X)
+  
+  # Fusion
+  reg_data <- foreign %>%
+    left_join(turkey, by = "TIME_PERIOD")
+  
+  # Créer les variables en différences
+  d_log_e <- diff_log(reg_data$TRY_X)
+  d_log_pC <- diff_log(reg_data$CPI_TUR)
+  d_log_pF <- diff_log(reg_data$CPI_FOR)
+  
+  # Créer le data.frame final
+  df <- data.frame(
+    d_log_e = d_log_e,
+    diff_inflation = d_log_pC - d_log_pF
+  )
+  
+  # Régression
+  lm(d_log_e ~ diff_inflation, data = df)
+}
+
+# Liste des pays à tester
+devises <- c("USA", "GBR", "JPN", "CHN", "RUS", "FRA")
+
+# Estimer les modèles
+models_ppa <- lapply(devises, function(dev) estime_ppa_relative(base_merged, dev))
+
+# Afficher avec stargazer
+library(stargazer)
+stargazer(models_ppa,
+          type = "text",
+          title = "Régression PPA relative pour toutes les paires TRY/X",
+          column.labels = devises,
+          digits = 4,
+          align = TRUE)
+
+```
